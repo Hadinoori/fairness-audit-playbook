@@ -1,0 +1,115 @@
+name: Fairness Audit Gate
+
+# Runs automatically when src/ changes are pushed.
+# Downloads COMPAS data from ProPublica's public repository.
+# If any deployment gate fails, the build is blocked.
+# A model cannot be deployed without passing all gates.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/**'
+
+jobs:
+  fairness-audit:
+    name: Fairness Audit — Phase 04 Gates
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install pandas numpy
+
+      - name: Download COMPAS data
+        run: |
+          mkdir -p data
+          curl -L https://raw.githubusercontent.com/propublica/compas-analysis/master/compas-scores-two-years.csv \
+            -o data/compas-scores-two-years.csv
+          echo "COMPAS data downloaded: $(wc -l < data/compas-scores-two-years.csv) rows"
+
+      - name: Run Fairness Audit Gate
+        run: |
+          python3 - <<'PYEOF'
+          import sys
+          import pandas as pd
+          import numpy as np
+          sys.path.insert(0, 'src')
+          from fairness_metrics import calculate_disparities, bootstrap_ci, check_deployment_gates
+
+          print("=== Fairness Audit Gate — Algorithmic Fairness Playbook v3.0 ===")
+          print()
+
+          # Load and filter data (ProPublica standard filter)
+          df = pd.read_csv('data/compas-scores-two-years.csv')
+          df = df[
+              (df['days_b_screening_arrest'] <= 30) &
+              (df['days_b_screening_arrest'] >= -30) &
+              (df['is_recid'] != -1) &
+              (df['c_charge_degree'] != 'O') &
+              (df['score_text'] != 'N/A')
+          ].copy()
+          df['high_risk'] = (df['decile_score'] >= 5).astype(int)
+          df_main = df[df['race'].isin(['African-American', 'Caucasian'])].copy()
+          print(f"Records loaded: {len(df_main)}")
+          print()
+
+          # Calculate disparity metrics
+          metrics = calculate_disparities(
+              df_main, 'race', 'Caucasian', 'African-American',
+              'two_year_recid', 'high_risk'
+          )
+
+          # Bootstrap confidence intervals (1000 draws for CI speed)
+          ci = bootstrap_ci(
+              df_main, 'race', 'Caucasian', 'African-American',
+              'two_year_recid', 'high_risk', n_resamples=1000
+          )
+
+          # Check deployment gates
+          gates = check_deployment_gates(metrics, ci)
+
+          print("Deployment Gate Results:")
+          failed = []
+          for gate, result in gates.items():
+              if gate == 'OVERALL':
+                  continue
+              status = result['status']
+              print(f"  {gate:<25} value={result['value']}  threshold={result['threshold']}  [{status}]")
+              if 'FAIL' in status:
+                  failed.append(gate)
+
+          print()
+          print("=" * 60)
+          print(f"DECISION: {gates['OVERALL']}")
+          print("=" * 60)
+
+          if failed:
+              print()
+              print(f"Blocked gates: {', '.join(failed)}")
+              print("Model deployment is blocked. Remediation required.")
+              print("See Fairness Audit Playbook Section 2.4 for remediation protocol.")
+              sys.exit(1)
+          else:
+              print("All gates passed. Model may proceed to deployment review.")
+              sys.exit(0)
+          PYEOF
+
+      - name: Upload Audit Report
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: fairness-audit-report
+          path: artifacts/

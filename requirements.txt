@@ -1,0 +1,10 @@
+# Fairness Audit Playbook — Dependencies
+# No external fairness libraries required.
+# Standard scientific Python stack only.
+
+pandas>=1.5.0
+numpy>=1.23.0
+
+# For running notebooks
+jupyter>=1.0.0
+notebook>=6.5.0
